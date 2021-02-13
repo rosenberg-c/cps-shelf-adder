@@ -1,94 +1,104 @@
-import requests
-import csv
-import re
-import sys
+import os
+
+from lib.auth import username_auth, authenticated
+from app.shelves import create_shelf, add_to_shelf, delete_shelf, get_shelves
 
 
-def username_auth(server_address, username, password):
-    return requests.post(
-        server_address + '/login?next=/',
-        data={
-            'username': username,
-            'password': password,
-            'submit': '',
-            'remember_me': 'on',
-            'next': '/'
-        }
+def sync_add(server_address, cookies, shelf_name, should_be_public_shelf, csv_path):
+    print("Create shelf")
+    new_id = create_shelf(
+        server_address=server_address,
+        cookies=cookies,
+        shelf_name=shelf_name,
+        should_be_public_shelf=should_be_public_shelf
+    )
+    print("Created shelf with id: " + new_id)
+    add_to_shelf(
+        csv_path=csv_path,
+        shelf_id=new_id,
+        server_address=server_address,
+        cookies=cookies,
     )
 
 
-def add_book_job(server_address, shelf_id, current_row, cookies, headers):
-    return requests.get(
-        server_address + '/shelf/add/' + shelf_id + '/' + current_row['id'],
-        cookies=cookies, headers=headers
+def sync_with_shelf(csv_path, shelf_id, server_address, cookies, shelf_name, public_shelf):
+    data = delete_shelf(
+        shelf_id=shelf_id,
+        server_address=server_address,
+        cookies=cookies,
     )
 
-
-def evaluate_job(current_row, shelf_id, job):
-    if job.status_code != 200:
-        print(
-            'Error: Failed to add book with id %s to shelf %s' % (current_row['id'], shelf_id))
+    if data.status_code == 200:
+        print("Removed shelf")
     else:
-        message = re.findall(u"id=\"flash_.*class=.*>(.*)</div>",
-                             job.content.decode('utf-8'))
-        if not message:
-            print('Error: Book with id %s already in shelf, or shelf not exisitend' % (
-                current_row['id']))
-        else:
-            print('Book with id %s was added to shelf with message: %s' % (
-                current_row['id'], message[0]))
+        print("Could not remove shelf")
+        exit()
 
-
-def authenticated(auth_i):
-    if auth_i.status_code == 200:
-        return True
-    return False
-
-
-def get_csv(csv_path):
-    if sys.version_info.major >= 3:
-        return open(csv_path, newline='', )
-    return open(csv_path)
+    sync_add(
+        csv_path=csv_path,
+        server_address=server_address,
+        cookies=cookies,
+        shelf_name=shelf_name,
+        should_be_public_shelf=public_shelf
+    )
 
 
 def mass_add_books(args):
+    server_address = args.server
     username = args.username
     password = args.password
-    shelf_id = args.shelf_id
+
     csv_path = args.csv_path
-    server_address = args.server
 
-    if shelf_id.isdigit():
-        _auth = username_auth(server_address=server_address, username=username, password=password)
-        if authenticated(auth_i=_auth):
-            print("SIGNED IN")
-            headers = {'Referer': server_address + '/'}
+    should_create_shelf = args.create_shelf
+    should_be_public_shelf = args.public_shelf
 
-            with get_csv(csv_path=csv_path) as csv_file:
-                reader = csv.DictReader(csv_file)
-                for index, current_row in enumerate(reader):
-                    if "id" in current_row:
-                        if current_row['id'].isdigit():
-                            evaluate_job(
-                                current_row=current_row,
-                                shelf_id=shelf_id,
-                                job=add_book_job(
-                                    server_address=server_address,
-                                    shelf_id=shelf_id,
-                                    current_row=current_row,
-                                    cookies=_auth.cookies,
-                                    headers=headers
-                                ),
-                            )
-
-                        else:
-                            print('Error: id %s is not a number' % current_row['id'])
-                    else:
-                        print(
-                            "No ID-field found in current row of csv file, check for seperation character (has to be ',') and spelling of 'id' field")
-                        exit()
-
-        else:
-            print('Error: Could not log in to calibre-web')
+    if args.shelf_name is not None:
+        shelf_name = args.shelf_name
     else:
-        print('Error: Shelf_id is not a number')
+        shelf_name = os.path.split(args.csv_path)[1].split(".")[0]
+
+    _auth = username_auth(
+        server_address=server_address,
+        username=username,
+        password=password
+    )
+
+    if authenticated(auth=_auth):
+        print("SIGNED IN")
+
+        _shelves = get_shelves(
+            server_address=server_address,
+            cookies=_auth.cookies,
+        )
+
+        shelf_existing = False
+
+        for s in _shelves:
+            if shelf_name in s["name"]:
+                shelf_existing = True
+
+        if shelf_existing:
+            for s in _shelves:
+                if s["name"] == shelf_name:
+                    sync_with_shelf(
+                        csv_path=csv_path,
+                        shelf_id=s["id"],
+                        server_address=server_address,
+                        cookies=_auth.cookies,
+                        shelf_name=shelf_name,
+                        public_shelf=should_be_public_shelf
+                    )
+
+        if shelf_existing is False and should_create_shelf is True:
+            print("Sync add")
+            sync_add(
+                csv_path=csv_path,
+                server_address=server_address,
+                cookies=_auth.cookies,
+                shelf_name=shelf_name,
+                should_be_public_shelf=should_be_public_shelf
+            )
+        print("End")
+    else:
+        print('Error: Could not log in to calibre-web')
